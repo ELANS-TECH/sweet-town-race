@@ -10,11 +10,6 @@ workflows:
       app_store_connect: Codemagic Key
 
     environment:
-      # Known-good signing setup: let Codemagic manage the profile, then
-      # apply it with `xcode-project use-profiles` below.
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.elanstech.sweettownrace
       vars:
         BUNDLE_ID: "com.elanstech.sweettownrace"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
@@ -96,6 +91,22 @@ workflows:
           cd ios/App
           agvtool new-marketing-version "$APP_VERSION"
           agvtool new-version -all "$BUILD_NUMBER"
+
+      - name: Initialise the signing keychain
+        script: keychain initialize
+
+      - name: Fetch (or create) the signing certificate and profile
+        script: |
+          # Pulls the App Store profile for this bundle ID from Apple via the
+          # App Store Connect API key, and creates the certificate/profile if
+          # they are missing. This replaces the `ios_signing` block — mixing the
+          # two is what caused "No matching profiles found".
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+
+      - name: Install the certificate into the keychain
+        script: keychain add-certificates
 
       - name: Apply signing profile
         script: xcode-project use-profiles
