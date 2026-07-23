@@ -1,0 +1,10 @@
+{
+  "appId": "com.elanstech.sweettownrace",
+  "appName": "Sweet Town Race",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#7EC8F2",
+    "scrollEnabled": false
+  }
+}

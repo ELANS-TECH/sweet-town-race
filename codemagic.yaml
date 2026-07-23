@@ -1,0 +1,110 @@
+workflows:
+  ios-release:
+    name: Sweet Town Race - iOS release
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    environment:
+      # App Store Connect API key saved in Codemagic under this exact name.
+      integrations:
+        app_store_connect: Codemagic Key
+      # Known-good signing setup: let Codemagic manage the profile, then
+      # apply it with `xcode-project use-profiles` below.
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.elanstech.sweettownrace
+      vars:
+        BUNDLE_ID: "com.elanstech.sweettownrace"
+        XCODE_WORKSPACE: "ios/App/App.xcworkspace"
+        XCODE_SCHEME: "App"
+        APP_VERSION: "1.0.0"
+      node: 20
+      xcode: latest
+      cocoapods: default
+
+    scripts:
+      - name: Install npm dependencies
+        script: npm install
+
+      - name: Create the iOS project (no Mac needed locally)
+        script: |
+          # `ios/` is gitignored, so Capacitor regenerates it fresh on every build.
+          if [ ! -d "ios" ]; then
+            npx cap add ios
+          fi
+          npx cap sync ios
+
+      - name: Generate app icon and launch screen
+        script: npx capacitor-assets generate --ios
+
+      - name: Make the app iPhone-only
+        script: |
+          # iPhone-only removes the iPad screenshot requirement in App Store Connect.
+          sed -i '' 's/TARGETED_DEVICE_FAMILY = "1,2";/TARGETED_DEVICE_FAMILY = 1;/g' \
+            ios/App/App.xcodeproj/project.pbxproj
+          grep -m1 "TARGETED_DEVICE_FAMILY" ios/App/App.xcodeproj/project.pbxproj
+
+      - name: Configure Info.plist
+        script: |
+          PLIST="ios/App/App/Info.plist"
+          PB=/usr/libexec/PlistBuddy
+
+          set_string () {
+            $PB -c "Set :$1 $2" "$PLIST" 2>/dev/null || $PB -c "Add :$1 string $2" "$PLIST"
+          }
+          set_bool () {
+            $PB -c "Set :$1 $2" "$PLIST" 2>/dev/null || $PB -c "Add :$1 bool $2" "$PLIST"
+          }
+
+          # Camera / photo permission text. Must be specific or review flags it (5.1.1).
+          set_string NSCameraUsageDescription \
+            "Take a photo so you can appear as the driver of your car. Photos stay on this device and are never uploaded or shared."
+          set_string NSPhotoLibraryUsageDescription \
+            "Choose a photo so you can appear as the driver of your car. Photos stay on this device and are never uploaded or shared."
+
+          # Portrait only, fullscreen, no status bar.
+          $PB -c "Delete :UISupportedInterfaceOrientations" "$PLIST" 2>/dev/null || true
+          $PB -c "Add :UISupportedInterfaceOrientations array" "$PLIST"
+          $PB -c "Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationPortrait" "$PLIST"
+          set_bool UIRequiresFullScreen true
+          set_bool UIStatusBarHidden true
+          set_bool UIViewControllerBasedStatusBarAppearance false
+
+          # Skips the export-compliance question on every upload (no encryption used).
+          set_bool ITSAppUsesNonExemptEncryption false
+
+          $PB -c "Print" "$PLIST" | head -40
+
+      - name: Set version and build number
+        script: |
+          cd ios/App
+          agvtool new-marketing-version "$APP_VERSION"
+          agvtool new-version -all "$BUILD_NUMBER"
+
+      - name: Apply signing profile
+        script: xcode-project use-profiles
+
+      - name: Build the IPA
+        script: |
+          xcode-project build-ipa \
+            --workspace "$XCODE_WORKSPACE" \
+            --scheme "$XCODE_SCHEME" \
+            --archive-xcargs "CODE_SIGN_STYLE=Manual TARGETED_DEVICE_FAMILY=1"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
+
+    publishing:
+      email:
+        recipients:
+          - elanba.amine@gmail.com
+        notify:
+          success: true
+          failure: true
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        # Flip to true only when you are ready to push a build straight to review.
+        submit_to_app_store: false
