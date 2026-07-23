@@ -4,10 +4,12 @@ workflows:
     instance_type: mac_mini_m2
     max_build_duration: 60
 
+    # App Store Connect API key saved in Codemagic under this exact name.
+    # NOTE: `integrations` belongs at the workflow level, not inside `environment`.
+    integrations:
+      app_store_connect: Codemagic Key
+
     environment:
-      # App Store Connect API key saved in Codemagic under this exact name.
-      integrations:
-        app_store_connect: Codemagic Key
       # Known-good signing setup: let Codemagic manage the profile, then
       # apply it with `xcode-project use-profiles` below.
       ios_signing:
@@ -39,10 +41,24 @@ workflows:
 
       - name: Make the app iPhone-only
         script: |
-          # iPhone-only removes the iPad screenshot requirement in App Store Connect.
-          sed -i '' 's/TARGETED_DEVICE_FAMILY = "1,2";/TARGETED_DEVICE_FAMILY = 1;/g' \
-            ios/App/App.xcodeproj/project.pbxproj
-          grep -m1 "TARGETED_DEVICE_FAMILY" ios/App/App.xcodeproj/project.pbxproj
+          set -e
+          PBX="ios/App/App.xcodeproj/project.pbxproj"
+          # Force every configuration to iPhone (1). Handles "1,2" and bare 1,2 forms.
+          sed -i '' -E 's/TARGETED_DEVICE_FAMILY = "[^"]*";/TARGETED_DEVICE_FAMILY = 1;/g' "$PBX"
+          sed -i '' -E 's/TARGETED_DEVICE_FAMILY = [0-9][0-9,]*;/TARGETED_DEVICE_FAMILY = 1;/g' "$PBX"
+          # If Capacitor's template ever omits the setting, add it next to the bundle id.
+          if ! grep -q "TARGETED_DEVICE_FAMILY" "$PBX"; then
+            perl -0pi -e 's/(PRODUCT_BUNDLE_IDENTIFIER = [^;]*;)/$1\n\t\t\t\tTARGETED_DEVICE_FAMILY = 1;/g' "$PBX"
+          fi
+          echo "--- TARGETED_DEVICE_FAMILY entries ---"
+          grep -n "TARGETED_DEVICE_FAMILY" "$PBX"
+          TOTAL=$(grep -c "TARGETED_DEVICE_FAMILY" "$PBX" || true)
+          IPHONE_ONLY=$(grep -c "TARGETED_DEVICE_FAMILY = 1;" "$PBX" || true)
+          if [ "$TOTAL" -eq 0 ] || [ "$TOTAL" != "$IPHONE_ONLY" ]; then
+            echo "ERROR: iPad is still enabled somewhere ($IPHONE_ONLY of $TOTAL are iPhone-only)."
+            exit 1
+          fi
+          echo "OK: all $TOTAL configurations are iPhone-only."
 
       - name: Configure Info.plist
         script: |
@@ -90,6 +106,26 @@ workflows:
             --workspace "$XCODE_WORKSPACE" \
             --scheme "$XCODE_SCHEME" \
             --archive-xcargs "CODE_SIGN_STYLE=Manual TARGETED_DEVICE_FAMILY=1"
+
+      - name: Verify the built app is iPhone-only
+        script: |
+          set -e
+          # Definitive check: read UIDeviceFamily out of the finished binary.
+          # App Store Connect decides iPhone/iPad support from this value.
+          IPA=$(ls build/ios/ipa/*.ipa | head -1)
+          rm -rf /tmp/ipacheck && mkdir -p /tmp/ipacheck
+          unzip -q "$IPA" -d /tmp/ipacheck
+          APP_PLIST=$(ls -d /tmp/ipacheck/Payload/*.app/Info.plist | head -1)
+          echo "UIDeviceFamily in the built app:"
+          /usr/libexec/PlistBuddy -c "Print :UIDeviceFamily" "$APP_PLIST"
+          FAMILIES=$(/usr/libexec/PlistBuddy -c "Print :UIDeviceFamily" "$APP_PLIST" \
+                     | grep -Eo '[0-9]+' | tr '\n' ' ' | xargs)
+          if [ "$FAMILIES" != "1" ]; then
+            echo "ERROR: expected device family 1 (iPhone) only, got: [$FAMILIES]"
+            echo "Family 2 = iPad. Stopping so an iPad-enabled build is never uploaded."
+            exit 1
+          fi
+          echo "CONFIRMED: iPhone-only build. No iPad screenshots will be required."
 
     artifacts:
       - build/ios/ipa/*.ipa
